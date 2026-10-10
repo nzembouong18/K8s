@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web
+  namespace: lab-pods
+  labels:
+    app: web
+    tier: front
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.27
+      ports:
+        - containerPort: 80
+      resources:
+        requests: {cpu: 50m, memory: 32Mi}
+        limits: {memory: 128Mi}

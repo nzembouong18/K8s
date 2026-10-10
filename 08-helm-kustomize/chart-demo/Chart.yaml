@@ -1,0 +1,6 @@
+apiVersion: v2
+name: webapp
+description: Chart pédagogique - application web avec Service, Ingress et HPA optionnels
+type: application
+version: 0.1.0
+appVersion: "1.27"

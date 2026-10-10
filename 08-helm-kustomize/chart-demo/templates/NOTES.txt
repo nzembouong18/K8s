@@ -1,0 +1,2 @@
+Release {{ .Release.Name }} déployée dans {{ .Release.Namespace }}.
+Accès local : kubectl port-forward svc/{{ include "webapp.fullname" . }} 8080:{{ .Values.service.port }}

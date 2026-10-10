@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: lab-config
+data:
+  APP_MODE: dev
+  LOG_LEVEL: info
+  app.properties: |
+    mode=dev
+    feature.x=true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+  namespace: lab-config
+type: Opaque
+stringData:            # converti en base64 par l'API
+  DB_PASSWORD: "S3cr3t!"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: lab-config
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: app}
+  template:
+    metadata:
+      labels: {app: app}
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "env | grep -E 'APP_|LOG_|DB_'; cat /etc/app/app.properties; sleep 3600"]
+          envFrom:
+            - configMapRef: {name: app-config}
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: app-secret, key: DB_PASSWORD}
+          volumeMounts:
+            - {name: cfg, mountPath: /etc/app}
+      volumes:
+        - name: cfg
+          configMap:
+            name: app-config
+            items:
+              - {key: app.properties, path: app.properties}
