@@ -1,0 +1,35 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: demo-app
+  namespace: lab-obs
+spec:
+  selector:
+    matchLabels: {app: demo-app}
+  endpoints:
+    - port: metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: demo-app
+  namespace: lab-obs
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: demo-app
+      rules:
+        - alert: DemoAppDown
+          expr: absent(up{job="demo-app", namespace="lab-obs"} == 1)
+          for: 1m
+          labels: {severity: critical}
+          annotations:
+            summary: "demo-app indisponible"
+            description: "Aucune instance demo-app n'est scrapée avec succès depuis 1 min."
+        - alert: DemoAppHighRestarts
+          expr: increase(kube_pod_container_status_restarts_total{namespace="lab-obs"}[10m]) > 3
+          labels: {severity: warning}
+          annotations:
+            summary: "Redémarrages fréquents de {{ $labels.pod }}"

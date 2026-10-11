@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-manuel
+spec:
+  capacity:
+    storage: 200Mi
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manuel
+  hostPath:
+    path: /mnt/data-manuel
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-manuel
+  namespace: lab-config
+spec:
+  storageClassName: manuel
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 100Mi

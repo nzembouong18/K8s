@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guestbook
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: guestbook}
+  template:
+    metadata:
+      labels: {app: guestbook}
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.26
+          ports:
+            - containerPort: 80
+          resources:
+            requests: {cpu: 20m, memory: 32Mi}
+            limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guestbook
+spec:
+  selector: {app: guestbook}
+  ports:
+    - port: 80

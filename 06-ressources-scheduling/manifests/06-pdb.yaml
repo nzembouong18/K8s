@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critique
+  namespace: lab-ressources
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: critique}
+  template:
+    metadata:
+      labels: {app: critique}
+    spec:
+      containers:
+        - {name: c, image: nginx:1.27, resources: {requests: {cpu: 10m}}}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: critique
+  namespace: lab-ressources
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: {app: critique}

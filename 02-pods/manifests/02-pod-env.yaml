@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello
+  namespace: lab-pods
+spec:
+  containers:
+    - name: hello
+      image: busybox:1.36
+      env:
+        - name: NOM
+          value: Kube
+      command: ["sh", "-c"]
+      args: ["while true; do echo \"Bonjour $NOM\"; sleep 5; done"]

@@ -1,0 +1,126 @@
+# Base fonctionnelle (NON durcie) de la Voting App - point de départ du projet final.
+apiVersion: v1
+kind: Secret
+metadata: {name: postgres, namespace: vote}
+type: Opaque
+stringData:
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres        # À remplacer / externaliser dans votre version prod
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: redis, namespace: vote, labels: {app: redis}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: redis}}
+  template:
+    metadata: {labels: {app: redis}}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports: [{containerPort: 6379}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: redis, namespace: vote}
+spec:
+  selector: {app: redis}
+  ports: [{port: 6379}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: postgres, namespace: vote}
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector: {matchLabels: {app: postgres}}
+  template:
+    metadata: {labels: {app: postgres}}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports: [{containerPort: 5432}]
+          envFrom:
+            - secretRef: {name: postgres}
+          env:
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 1Gi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: postgres, namespace: vote}
+spec:
+  clusterIP: None
+  selector: {app: postgres}
+  ports: [{port: 5432}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: vote, namespace: vote, labels: {app: vote}}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: vote}}
+  template:
+    metadata: {labels: {app: vote}}
+    spec:
+      containers:
+        - name: vote
+          image: dockersamples/examplevotingapp_vote:latest
+          ports: [{containerPort: 80}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: vote, namespace: vote}
+spec:
+  selector: {app: vote}
+  ports: [{port: 80, targetPort: 80}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: worker, namespace: vote, labels: {app: worker}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: worker}}
+  template:
+    metadata: {labels: {app: worker}}
+    spec:
+      containers:
+        - name: worker
+          image: dockersamples/examplevotingapp_worker:latest
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: result, namespace: vote, labels: {app: result}}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: result}}
+  template:
+    metadata: {labels: {app: result}}
+    spec:
+      containers:
+        - name: result
+          image: dockersamples/examplevotingapp_result:latest
+          ports: [{containerPort: 80}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: result, namespace: vote}
+spec:
+  selector: {app: result}
+  ports: [{port: 80, targetPort: 80}]
+---
+# Les images worker/result se connectent au hostname "db" (codé en dur) -> alias de Service
+apiVersion: v1
+kind: Service
+metadata: {name: db, namespace: vote}
+spec:
+  selector: {app: postgres}
+  ports: [{port: 5432}]

@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-app
+  namespace: lab-ressources
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: gpu-app}
+  template:
+    metadata:
+      labels: {app: gpu-app}
+    spec:
+      nodeSelector:
+        disk: hdd                     # formation-worker2
+      tolerations:
+        - {key: dedie, operator: Equal, value: gpu, effect: NoSchedule}
+      containers:
+        - {name: c, image: nginx:1.27, resources: {requests: {cpu: 10m}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread
+  namespace: lab-ressources
+spec:
+  replicas: 4
+  selector:
+    matchLabels: {app: spread}
+  template:
+    metadata:
+      labels: {app: spread}
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: {app: spread}
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 50
+              preference:
+                matchExpressions:
+                  - {key: disk, operator: In, values: [ssd]}
+      containers:
+        - {name: c, image: nginx:1.27, resources: {requests: {cpu: 10m}}}
