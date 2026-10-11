@@ -74,7 +74,7 @@ kubectl apply -f manifests/05-cronjob.yaml && kubectl get cronjob,jobs -w
 ```bash
 kubectl apply -f manifests/01-deployment.yaml
 kubectl scale deploy web --replicas=5 ; kubectl scale deploy web --replicas=2
-kubectl delete pod -l app=web --field-selector=status.phase=Running --wait=false
+kubectl delete pod $(kubectl get pods -l app=web -o name | head -1)
 ```
 Le ReplicaSet recrée un Pod : nouveau Pod = nouveau nom (suffixe aléatoire) et nouvelle IP.
 </details>
