@@ -58,6 +58,98 @@ Applications : **Velero** (objets + volumes), snapshots CSI.
 ### 1.4 Extensibilité
 **CRD** = nouveau type d'objet ; **Operator** = CRD + contrôleur qui encode l'expertise d'exploitation (ex. CloudNativePG, Strimzi, cert-manager, Prometheus Operator). Points d'extension : CRI, CNI, CSI, admission webhooks, schedulers custom.
 
+### 1.5 GitOps : mise en œuvre détaillée
+
+**Deux dépôts, deux rôles.** Le dépôt *applicatif* (code, Dockerfile, tests) produit une image ; le dépôt *de configuration* (manifestes, values, overlays) décrit l'état désiré de chaque environnement. Le pipeline CI **ne déploie pas** : il construit, teste, scanne, signe, publie l'image, puis ouvre un commit/une PR dans le dépôt de configuration (nouveau tag). L'agent GitOps dans le cluster *tire* ce changement.
+
+**Push vs pull.**
+| | CI/CD « push » (`kubectl apply` depuis la CI) | GitOps « pull » |
+|---|---|---|
+| Identifiants | la CI détient des droits sur le cluster | le cluster détient seulement un accès **en lecture** à Git |
+| Dérive | non détectée | détectée et corrigée (`selfHeal`) |
+| Audit | logs de pipeline | historique Git |
+| Retour arrière | relancer un ancien pipeline | `git revert` |
+| Multi-clusters | scripts à maintenir | un agent par cluster ou un hub |
+
+**Argo CD — objets clés.**
+- `Application` : source (dépôt, chemin, révision, Helm/Kustomize) → destination (cluster, namespace) + politique de synchronisation.
+- `AppProject` : périmètre de sécurité (dépôts, destinations, types de ressources autorisés, rôles).
+- `ApplicationSet` : génère des Applications depuis des *générateurs* (liste, dossiers Git, clusters, matrice) → un modèle, N environnements/clusters.
+- Politique de sync : `automated`, `prune` (supprime ce qui n'est plus dans Git), `selfHeal` (annule les modifications manuelles), `syncOptions` (`CreateNamespace`, `ServerSideApply`, `PruneLast`), **sync waves** (`argocd.argoproj.io/sync-wave`) et **hooks** (PreSync, PostSync) pour ordonner (CRDs → opérateurs → applications).
+- Statuts : `Synced/OutOfSync`, `Healthy/Progressing/Degraded`, `Missing`.
+- Piège courant : un contrôleur modifie un champ (HPA → `replicas`) et Argo détecte une dérive perpétuelle → `ignoreDifferences`.
+
+**Flux CD** propose la même philosophie avec des CRD : `GitRepository`, `Kustomization`, `HelmRelease`, `ImagePolicy` (mise à jour automatique des tags).
+
+**Structure de dépôt conseillée**
+```
+gitops/
+├── apps/                       # une application par dossier : base + overlays
+│   └── api/{base,overlays/{dev,staging,prod}}
+├── platform/                   # socle : ingress, cert-manager, monitoring, policies
+├── clusters/{dev,prod}/        # ce qui est déployé dans chaque cluster (App of Apps / ApplicationSet)
+└── README.md
+```
+**Promotion entre environnements** : modification du tag dans `overlays/dev`, validation automatique, PR vers `staging`, puis `prod` après approbation. Chaque étape est un commit relu.
+
+**Secrets en GitOps** : jamais en clair — Sealed Secrets, SOPS (+ KSOPS / plugin Flux), External Secrets Operator.
+
+### 1.6 Livraison progressive
+| Technique | Principe | Outil |
+|---|---|---|
+| Rolling update | remplacement progressif | natif |
+| Blue/Green | deux versions complètes, bascule instantanée | Argo Rollouts, Flagger |
+| Canary | 5 % → 25 % → 100 % du trafic, avec analyse | Argo Rollouts / Flagger + Ingress/Gateway/mesh |
+| Analyse automatique | requêtes Prometheus (taux d'erreur, latence) qui valident ou annulent | `AnalysisTemplate` |
+| Feature flags | activer progressivement une fonctionnalité | applicatif |
+Condition : des **métriques fiables** et un retour arrière automatique. Sans observabilité (module 09), le canary n'est qu'un déploiement lent.
+
+### 1.7 Architecture d'un cluster de production
+**Dimensionnement et topologie**
+- Control plane : 3 nœuds (5 pour de très grands clusters), répartis sur 3 zones, etcd sur disques rapides et dédiés, API derrière un load-balancer.
+- Workers : pools par usage (système, applicatif, GPU, Spot), tailles homogènes dans un pool pour un bin-packing prévisible.
+- Limites pratiques : ≤ 110 Pods/nœud par défaut, ≤ 5 000 nœuds / 150 000 Pods par cluster (limites de test officielles) ; on **multiplie les clusters** pour l'isolation (environnements, régions, criticité) plutôt que de grossir indéfiniment.
+- Clusters managés (EKS, AKS, GKE) : le control plane est géré par le fournisseur ; vous gérez les nœuds (ou utilisez des modes sans nœud : Fargate, Autopilot).
+
+**Environnements et cycle** : `dev` (jetable) → `staging` (réplique de prod en plus petit) → `prod`. Mêmes manifestes, valeurs différentes.
+
+**Réseau et exposition** : CNI avec NetworkPolicy, Ingress/Gateway redondant et dimensionné, DNS (CoreDNS + NodeLocal DNSCache), certificats automatisés (cert-manager), DNS externe automatisé (external-dns), protection WAF/DDoS en amont.
+
+**Multi-tenancy** : par namespace (quotas, RBAC, NetworkPolicy, Pod Security) pour des équipes de confiance ; clusters virtuels (vcluster) ou dédiés pour une isolation forte.
+
+### 1.8 Fiabilité : SLO, capacité, PRA
+- **SLO/SLI** pour chaque service ; budget d'erreur qui arbitre vitesse de livraison et stabilité.
+- **Tests de résilience** (chaos engineering : Chaos Mesh, Litmus) : tuer un Pod, un nœud, une zone ; vérifier que les SLO tiennent.
+- **Capacité** : marge pour absorber la perte d'une zone (N+1), autoscaling testé, quotas du cloud vérifiés à l'avance.
+- **PRA / reprise** : définir RPO (perte de données acceptable) et RTO (durée d'indisponibilité acceptable). Sauvegardes : etcd (état du cluster), Velero (objets + volumes), sauvegardes applicatives (dumps, PITR). Une sauvegarde **non restaurée régulièrement n'existe pas**. Le GitOps rend la reconstruction d'un cluster rapide : nouveau cluster + agent GitOps + restauration des données.
+- **Runbooks et astreinte** : procédures écrites, alertes actionnables, post-mortems sans recherche de coupable.
+
+### 1.9 Cycle de vie et mises à jour
+- Kubernetes publie **3 versions mineures par an** et supporte les trois dernières (~14 mois) : planifier une montée de version au moins deux fois par an.
+- **Ordre** : sauvegarde etcd → vérifier les API dépréciées → control plane → addons (CNI, CSI, CoreDNS, kube-proxy) → workers (par pool, `cordon`/`drain`/mise à niveau/`uncordon`) → validation.
+- **Une version mineure à la fois**. Le skew de versions autorisé : kubelet jusqu'à 3 versions en retard de l'API server (depuis 1.28), `kubectl` à ±1.
+- **Stratégies de nœuds** : *in-place* (kubeadm) ou *remplacement* (nouveaux nœuds d'un pool, drain des anciens) — la seconde, immuable, est préférable.
+- Surveiller : API dépréciées (`kubectl get --raw /metrics | grep apiserver_requested_deprecated_apis`, Pluto), compatibilité des opérateurs, notes de version.
+
+### 1.10 Sécurité et conformité en production
+Combiner les modules précédents : RBAC par équipe via OIDC, Pod Security `restricted`, NetworkPolicy par défaut, politiques d'admission (Kyverno), images signées et scannées, chiffrement des secrets etcd, audit logs envoyés hors cluster, rotation des certificats (kubeadm gère l'expiration à 1 an : `kubeadm certs check-expiration`), `kube-bench`/Kubescape en continu, mises à jour de sécurité rapides.
+
+### 1.11 FinOps
+Visibilité (OpenCost/Kubecost par namespace, label d'équipe), ajustement des requests (VPA/Goldilocks), consolidation (Karpenter), Spot pour le stateless tolérant, extinction des environnements non-prod hors heures, stockage (classes adaptées, nettoyage des volumes orphelins), trafic inter-zones (coûts de sortie).
+
+### 1.12 Opérateurs et CRD : écrire ou adopter ?
+Un **opérateur** = CRD + contrôleur qui réconcilie l'état d'un système complexe (base de données, broker, certificats). Avant d'en écrire un, cherchez un opérateur mature (OperatorHub, CNCF). Écrire le sien (Kubebuilder, Operator SDK, Go ; ou Metacontroller / KRO) est justifié quand une logique d'exploitation répétitive peut être encodée. Boucle de réconciliation : *observer → comparer → agir → mettre à jour `status`*, idempotente et tolérante aux erreurs. Les **finalizers** garantissent le nettoyage avant suppression.
+
+### 1.13 Check-list de « production readiness » (résumé)
+- [ ] ≥ 2 réplicas, PDB, anti-affinity/topologySpread
+- [ ] requests/limits, probes, arrêt gracieux
+- [ ] HPA ou capacité statique justifiée
+- [ ] Observabilité : métriques, logs, traces, alertes avec runbooks
+- [ ] Sécurité : Pod Security, RBAC minimal, NetworkPolicy, secrets externes, images signées
+- [ ] Sauvegardes testées (données + configuration), RPO/RTO documentés
+- [ ] Déploiement GitOps, retour arrière rapide testé
+- [ ] Documentation : architecture, exploitation, contacts d'astreinte
+
 ## 2. 🎬 Démo (60 min)
 
 ### Démo A — Argo CD
