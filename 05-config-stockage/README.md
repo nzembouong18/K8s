@@ -44,6 +44,88 @@ Pod ──► PVC (demande : taille, mode, classe) ──bind──► PV (volum
 
 Sur kind : StorageClass `standard` (local-path-provisioner), RWO.
 
+### 1.4 Configuration : les principes
+Le principe « 12-factor » : **la configuration est séparée du code** et fournie par l'environnement. Une même image doit pouvoir tourner en dev, recette et production avec des ConfigMaps/Secrets différents. Choix du mode de consommation :
+| Mode | Avantages | Inconvénients |
+|---|---|---|
+| Variables d'environnement (`env`, `envFrom`) | simple, universel | figées au démarrage ; visibles via `describe`/`/proc` ; pas pour les gros contenus |
+| Volume (fichiers) | mise à jour à chaud (~1 min), fichiers volumineux, certificats | l'application doit recharger (SIGHUP, watcher) |
+| Arguments de ligne de commande | explicite | peu pratique pour beaucoup de valeurs |
+| API Kubernetes (lecture directe) | dynamique | couple l'application à K8s (RBAC nécessaire) |
+
+### 1.5 Créer ConfigMaps et Secrets
+```bash
+kubectl create configmap app --from-literal=LOG_LEVEL=info --from-file=nginx.conf --from-env-file=app.env
+kubectl create secret generic db --from-literal=password='S3cr3t!' --dry-run=client -o yaml
+kubectl create secret tls site --cert=tls.crt --key=tls.key
+kubectl create secret docker-registry regcred --docker-server=ghcr.io --docker-username=u --docker-password=$TOKEN
+```
+Types de Secret : `Opaque` (défaut), `kubernetes.io/tls`, `kubernetes.io/dockerconfigjson`, `kubernetes.io/basic-auth`, `kubernetes.io/ssh-auth`, `kubernetes.io/service-account-token`.
+Montage sélectif : `items:` (choisir les clés et les noms de fichier), `defaultMode: 0400` (permissions), `optional: true` (ne pas échouer si absent).
+**`subPath`** : monte un seul fichier dans un répertoire existant sans le masquer, mais **désactive la mise à jour automatique** — à connaître avant de s'étonner qu'une config ne se recharge pas.
+**Projected volume** : fusionne plusieurs sources (ConfigMap, Secret, token de ServiceAccount, Downward API) dans un même répertoire.
+
+### 1.6 Les Secrets : ce qu'ils protègent vraiment
+- **base64 n'est pas du chiffrement** : `echo c2VjcmV0 | base64 -d`.
+- Par défaut, les Secrets sont stockés **en clair dans etcd** : activer le chiffrement au repos (`EncryptionConfiguration`, KMS provider) ; toute personne pouvant `get secrets` dans un namespace les lit.
+- Un Secret monté en volume est stocké en **tmpfs** (mémoire du nœud), pas sur disque.
+- Ne mettez jamais un Secret dans Git en clair. Options : **Sealed Secrets** (chiffrés avec la clé du cluster, versionnables), **SOPS** (+ age/KMS), **External Secrets Operator** (synchronise depuis Vault, AWS Secrets Manager, Azure Key Vault, GCP Secret Manager), **Secrets Store CSI Driver** (montage direct sans Secret Kubernetes).
+- Rotation : prévoir le rechargement de l'application ou un redémarrage contrôlé (`rollout restart`, Reloader/Stakater).
+
+### 1.7 Mettre à jour une configuration sans mauvaise surprise
+1. **Immutabilité** : `immutable: true` + un **nouveau nom** à chaque version (`app-config-v7`, ou suffixe de hash généré par Kustomize) → le Deployment référence le nouveau nom, ce qui déclenche un rollout propre et permet le **retour arrière** (l'ancien ConfigMap existe toujours).
+2. **Rechargement à chaud** : montage en volume + application qui surveille le fichier (ou sidecar qui envoie un signal).
+3. **Redémarrage explicite** : `kubectl rollout restart deploy/x`.
+Mettre à jour un ConfigMap « en place » sans stratégie est la source classique d'incidents : une partie des Pods voit la nouvelle valeur, l'autre l'ancienne.
+
+### 1.8 Volumes : panorama
+| Famille | Exemples | Remarque |
+|---|---|---|
+| Éphémères | `emptyDir` (disque ou `medium: Memory`), `ephemeral` (volume générique éphémère) | disparaissent avec le Pod ; `sizeLimit` conseillé |
+| Informations | `configMap`, `secret`, `downwardAPI`, `projected` | lecture seule |
+| Persistants | `persistentVolumeClaim` | cycle de vie indépendant |
+| Nœud | `hostPath`, `local` | lient le Pod à un nœud : éviter |
+| Réseau (in-tree legacy) | NFS, iSCSI | préférer CSI |
+`emptyDir` survit aux **redémarrages de conteneur** mais pas à la suppression du Pod. Un conteneur dont le système de fichiers racine est en lecture seule (durcissement, module 07) a besoin d'`emptyDir` pour `/tmp` et les caches.
+
+### 1.9 Stockage persistant : le modèle complet
+```
+              ┌─────────────── provisionnement dynamique ───────────────┐
+Pod ─► PVC ─(bind)─► PV ─► volume réel (disque cloud, Ceph, NFS…)          │
+        ▲              ▲                                                    │
+        └ storageClassName ──► StorageClass ──► driver CSI ◄───────────────┘
+```
+- **PersistentVolume (PV)** : ressource du cluster représentant un volume réel (non namespacé). **PersistentVolumeClaim (PVC)** : demande d'un utilisateur (namespacée). Le *binding* PVC↔PV est 1-1.
+- **StorageClass** : définit le *provisioner* (driver CSI), les paramètres (type de disque, IOPS, chiffrement), `reclaimPolicy`, `volumeBindingMode`, `allowVolumeExpansion`.
+- **Cycle de vie d'un PV** : `Available` → `Bound` → `Released` (PVC supprimé) → selon la politique : supprimé (`Delete`) ou conservé (`Retain` : doit être nettoyé/réaffecté manuellement).
+- **`WaitForFirstConsumer`** : indispensable avec des volumes zonaux (disque cloud limité à une zone) ; le PV est créé dans la zone où le Pod est planifié.
+- **Modes d'accès** : `ReadWriteOnce` (un **nœud**), `ReadWriteOncePod` (un seul Pod), `ReadOnlyMany`, `ReadWriteMany` (plusieurs nœuds : NFS, CephFS, EFS, Azure Files). Un volume RWO attaché à un nœud empêche un nouveau Pod de démarrer ailleurs tant qu'il n'est pas détaché (cause de *Multi-Attach error* lors d'une bascule).
+- **Mode de volume** : `Filesystem` (défaut) ou `Block` (périphérique brut pour bases de données).
+
+### 1.10 Exploiter le stockage
+| Besoin | Outil / pratique |
+|---|---|
+| Agrandir un volume | éditer `spec.resources.requests.storage` du PVC (si `allowVolumeExpansion`), parfois redémarrage du Pod |
+| Réduire un volume | impossible : créer un nouveau volume et migrer |
+| Sauvegarde cohérente | `VolumeSnapshot` (CSI) + **Velero** ; quiescer l'application (dump, `fsfreeze`) |
+| Restaurer | PVC créé depuis un snapshot (`dataSource`) |
+| Cloner | PVC avec `dataSource` = autre PVC |
+| Performance | choisir la classe adaptée (SSD, IOPS provisionnés) ; mesurer avec `fio` |
+| Données critiques | `Retain`, réplication, sauvegarde hors cluster **testée en restauration** |
+| Nettoyage | PVC orphelins après suppression d'un StatefulSet : `kubectl get pvc -A` régulièrement |
+**Bases de données** : les opérateurs (CloudNativePG, Percona, Zalando) gèrent réplication, sauvegarde PITR et bascule ; un StatefulSet seul ne suffit pas. Le stockage local (NVMe) offre de meilleures performances mais lie les données au nœud.
+
+### 1.11 Dépannage du stockage
+| Symptôme | Cause probable | Piste |
+|---|---|---|
+| PVC `Pending` | pas de StorageClass par défaut / provisioner absent / `WaitForFirstConsumer` sans Pod | `kubectl describe pvc`, `get sc` |
+| Pod `ContainerCreating` bloqué | volume non attachable, Secret/ConfigMap manquant | événements du Pod |
+| `Multi-Attach error` | volume RWO encore attaché à un autre nœud | attendre le détachement, vérifier l'ancien Pod |
+| `permission denied` à l'écriture | UID du conteneur ≠ propriétaire du volume | `securityContext.fsGroup` |
+| Espace plein | volume sous-dimensionné, logs non tournés | `df -h` dans le Pod, expansion |
+| PV `Released` non réutilisé | `Retain` : le PV garde un `claimRef` | nettoyer le `claimRef` après avoir sauvegardé |
+`fsGroup` : modifie le groupe propriétaire du volume pour les Pods non-root ; `fsGroupChangePolicy: OnRootMismatch` accélère le montage de gros volumes.
+
 ## 2. 🎬 Démo (35 min)
 
 ```bash

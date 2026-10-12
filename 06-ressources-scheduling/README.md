@@ -47,6 +47,86 @@ Mécanismes : `httpGet`, `tcpSocket`, `exec`, `grpc`. Piège classique : livenes
 - **ResourceQuota** : plafonne un namespace ; **LimitRange** : défauts/min/max par conteneur
 - **PodDisruptionBudget** : nombre minimal de Pods disponibles pendant `drain`/maintenance
 
+### 1.5 Dimensionner les ressources : la démarche
+1. **Mesurer** en conditions réelles (tests de charge) : `kubectl top pods`, Prometheus (`container_memory_working_set_bytes`, `container_cpu_usage_seconds_total`), VPA en mode `Off` (recommandations).
+2. **Fixer les requests** près de l'usage typique (percentile 90–95) : elles garantissent la capacité et orientent le scheduler.
+3. **Fixer la limite mémoire** au-dessus du pic observé avec marge (20–30 %) : dépasser = OOMKilled.
+4. **Limite CPU** : débat ouvert. Une limite provoque du *throttling* même quand le nœud est inoccupé ; beaucoup d'équipes ne posent que des **requests CPU** et laissent les Pods consommer le CPU disponible.
+5. **Réviser** régulièrement : l'application évolue.
+Risques : *requests trop hautes* → nœuds sous-utilisés, coûts gonflés ; *trop basses* → surcharge des nœuds, voisins bruyants, évictions ; *pas de requests* → BestEffort, évincé en premier, pas d'HPA possible.
+
+**Comment le CPU et la mémoire sont appliqués.** Les requests CPU deviennent des `cpu.weight` (parts proportionnelles) dans les cgroups ; les limites CPU des quotas (`cpu.max`) → throttling. La mémoire est incompressible : au-delà de la limite, le noyau tue le processus (OOM killer). Une **fuite mémoire** se traduit par des redémarrages cycliques (`OOMKilled`).
+**Mémoire du nœud** : si un nœud manque de mémoire, le kubelet **évince** d'abord les Pods BestEffort puis les Burstable qui dépassent leurs requests (seuils `eviction-hard`). `allocatable` = capacité − réserves système/kubelet : c'est ce que le scheduler utilise.
+**Ressources étendues** : GPU (`nvidia.com/gpu: 1`), hugepages, ressources personnalisées, déclarées par des *device plugins* ; non partageables en fraction par défaut.
+
+### 1.6 Probes : bien les régler
+```yaml
+startupProbe:   {httpGet: {path: /healthz, port: http}, failureThreshold: 30, periodSeconds: 5}   # jusqu'à 150 s de démarrage
+readinessProbe: {httpGet: {path: /ready,   port: http}, periodSeconds: 5,  failureThreshold: 3}
+livenessProbe:  {httpGet: {path: /healthz, port: http}, periodSeconds: 10, failureThreshold: 3, timeoutSeconds: 2}
+```
+| Paramètre | Défaut | Rôle |
+|---|---|---|
+| `initialDelaySeconds` | 0 | attente avant la 1ʳᵉ sonde (préférer une startupProbe) |
+| `periodSeconds` | 10 | fréquence |
+| `timeoutSeconds` | 1 | délai de réponse |
+| `failureThreshold` | 3 | échecs consécutifs avant action |
+| `successThreshold` | 1 | succès nécessaires (readiness) |
+Règles d'or :
+- **Readiness** = « puis-je servir ? » : peut dépendre de la base de données, du cache chaud. Elle retire le Pod du Service **sans** le redémarrer.
+- **Liveness** = « suis-je bloqué ? » : doit être **simple et interne** (ne dépend pas d'autres services). Une liveness trop agressive ou dépendante d'un tiers provoque des cascades de redémarrages lors d'un incident.
+- **Startup** pour les applications lentes à démarrer (JVM) : désactive les deux autres tant qu'elle n'a pas réussi.
+- Séparer les endpoints (`/live`, `/ready`) ; ne pas journaliser chaque sonde.
+- Sans readiness probe, un rolling update envoie du trafic à des Pods qui ne sont pas prêts.
+
+### 1.7 Scheduling : comprendre les décisions
+Le scheduler applique d'abord des **filtres** (« le nœud est-il éligible ? ») puis des **scores** (« quel est le meilleur ? »).
+| Mécanisme | Dur / souple | Cas d'usage |
+|---|---|---|
+| `nodeSelector` | dur | cibler un pool (`disk=ssd`) |
+| `nodeAffinity` required / preferred | dur / souple | expressions riches (`In`, `NotIn`, `Exists`, `Gt`) |
+| `podAffinity` | dur / souple | rapprocher un Pod d'un autre (cache près de l'app) |
+| `podAntiAffinity` | dur / souple | répartir les réplicas (un par nœud / zone) |
+| `topologySpreadConstraints` | dur (`DoNotSchedule`) / souple (`ScheduleAnyway`) | répartition **équilibrée** (`maxSkew`) par zone, nœud, etc. |
+| Taints / tolerations | dur (`NoSchedule`, `NoExecute`) | nœuds dédiés (GPU, système), évictions automatiques |
+| `priorityClassName` | — | prioritaire : peut **préempter** (évincer) des Pods moins prioritaires |
+| `nodeName` | forcé | contourne le scheduler : à éviter |
+Les taints automatiques `node.kubernetes.io/not-ready` et `unreachable` (`NoExecute`) évincent les Pods après `tolerationSeconds` (300 s par défaut). Labels bien connus : `kubernetes.io/hostname`, `topology.kubernetes.io/zone`, `node.kubernetes.io/instance-type`.
+**Pourquoi un Pod reste Pending ?** `kubectl describe pod` → `FailedScheduling: 0/3 nodes are available: 1 Insufficient cpu, 2 node(s) had untolerated taint…` : le message énumère les raisons nœud par nœud.
+
+### 1.8 HPA : fonctionnement et réglages
+Formule : `replicasDésirés = ceil( replicasActuels × valeurActuelle / valeurCible )`. Exemple : 4 Pods à 90 % CPU avec cible 60 % → `ceil(4 × 90 / 60) = 6`.
+- Le pourcentage est calculé **par rapport aux requests** : pas de requests CPU → pas d'autoscaling.
+- Le comportement est réglable : `behavior.scaleUp/scaleDown` (`stabilizationWindowSeconds`, `policies` en Pods ou %), pour éviter le *flapping* (300 s de stabilisation à la descente par défaut).
+- Métriques : `Resource` (CPU/mémoire), `Pods`/`Object` (via adaptateur Prometheus), `External` (file d'attente) ; **KEDA** simplifie le scaling piloté par les événements (Kafka, SQS, cron) et peut descendre à zéro.
+- Ne combinez pas HPA et VPA sur la même métrique ; ne fixez pas `replicas` dans le manifeste d'un Deployment géré par un HPA.
+- L'HPA agit sur les Pods : si les nœuds sont pleins, des Pods restent `Pending` tant que **Cluster Autoscaler/Karpenter** n'ajoute pas de capacité.
+
+### 1.9 Garde-fous par namespace
+```yaml
+kind: ResourceQuota
+spec:
+  hard: {requests.cpu: "4", requests.memory: 8Gi, limits.memory: 16Gi, pods: "30", persistentvolumeclaims: "10", count/deployments.apps: "20"}
+---
+kind: LimitRange
+spec:
+  limits:
+    - type: Container
+      default:        {cpu: 500m, memory: 256Mi}   # limits par défaut
+      defaultRequest: {cpu: 100m, memory: 128Mi}   # requests par défaut
+      max:            {cpu: "2",  memory: 2Gi}
+```
+Une fois un `ResourceQuota` sur `requests.*`/`limits.*` posé, tout Pod **doit** déclarer ces ressources (ou hériter d'un `LimitRange`), sinon il est refusé. Ces objets sont la base de la **multi-location** : ils empêchent une équipe d'affamer les autres.
+
+### 1.10 Disponibilité pendant les opérations
+- **PodDisruptionBudget** : `minAvailable` ou `maxUnavailable`. Il protège contre les **perturbations volontaires** (drain, upgrade de nœud, autoscaler) — pas contre les pannes. Un PDB trop strict (`minAvailable` = nombre de réplicas) **bloque** les drains.
+- `kubectl drain` : `cordon` (plus de nouveaux Pods) puis éviction respectueuse des PDB et du `terminationGracePeriodSeconds`.
+- **Priorité et préemption** : réserver une `PriorityClass` haute aux composants critiques, une classe basse (voire `preemptionPolicy: Never`) aux tâches batch.
+- **Haute disponibilité d'un service** : ≥ 2 réplicas + anti-affinity/topologySpread + PDB + readiness + arrêt gracieux.
+
+### 1.11 Le coût des ressources
+Un cluster paie ce qui est **réservé** (requests), pas ce qui est utilisé. Leviers : right-sizing (VPA, Goldilocks), consolidation de nœuds (Karpenter), instances Spot/préemptibles pour le stateless tolérant, extinction hors heures des environnements de dev, suivi par namespace/label (OpenCost, Kubecost).
+
 ## 2. 🎬 Démo (45 min)
 
 Prérequis : `make metrics`

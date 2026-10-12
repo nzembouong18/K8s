@@ -70,6 +70,116 @@ spec:                   # état DÉSIRÉ (écrit par vous)
 ### 1.5 kubectl — commandes essentielles
 `get`, `describe`, `logs`, `exec`, `apply`, `delete`, `explain`, `api-resources`, `diff`, `-o yaml|wide|json|jsonpath`, `-n <ns>`, `-A`, `-l <label>`, `--watch`.
 
+### 1.6 Les composants en détail
+
+**kube-apiserver — le pipeline d'une requête.** Chaque appel (`kubectl`, kubelet, contrôleur) traverse la même chaîne :
+1. **Authentification** (qui es-tu ? certificat client, jeton de ServiceAccount, OIDC) ;
+2. **Autorisation** (as-tu le droit ? RBAC) ;
+3. **Admission mutante** (modifie l'objet : injection de sidecar, valeurs par défaut) ;
+4. **Validation du schéma** (l'objet respecte-t-il l'API ?) ;
+5. **Admission validante** (politiques : Pod Security, Kyverno, ValidatingAdmissionPolicy) ;
+6. **Persistance** dans etcd, puis notification aux observateurs (`watch`).
+L'API server est **sans état** : on peut en avoir plusieurs derrière un load-balancer.
+
+**etcd — la mémoire du cluster.** Base clé-valeur répliquée par le consensus **Raft** : une écriture n'est validée que si la **majorité** (quorum) des membres l'a enregistrée.
+| Membres | Quorum | Pannes tolérées |
+|:---:|:---:|:---:|
+| 1 | 1 | 0 |
+| 3 | 2 | 1 |
+| 5 | 3 | 2 |
+Toujours un nombre **impair** (4 membres ne tolèrent pas plus de pannes que 3). Perdre le quorum = cluster en lecture seule. Les performances d'etcd dépendent de la latence disque : SSD obligatoire en production.
+
+**kube-scheduler — deux phases.** Pour chaque Pod non affecté : (1) **filtrage** (quels nœuds *peuvent* l'accueillir ? ressources, taints, affinités, volumes) ; (2) **notation** (parmi eux, lequel est le *meilleur* ? répartition, localité d'image). Il ne démarre rien : il écrit seulement `spec.nodeName`.
+
+**kube-controller-manager — des dizaines de boucles.** Chaque contrôleur observe un type d'objet et agit : ReplicaSet (nombre de Pods), Deployment (révisions), Node (détection de nœud perdu), Job, EndpointSlice, ServiceAccount, Namespace (nettoyage à la suppression)… Un **cloud-controller-manager** gère la partie spécifique au cloud (LoadBalancer, volumes, routes).
+
+**kubelet — l'agent du nœud.** Observe les Pods affectés à son nœud, demande au runtime (CRI) de créer sandbox et conteneurs, exécute les **probes**, monte les volumes, remonte `status` et heartbeats (objet `Lease`). Il peut aussi lancer des **static Pods** depuis `/etc/kubernetes/manifests` : c'est ainsi que kubeadm démarre apiserver, scheduler, controller-manager et etcd.
+
+**kube-proxy — les Services.** Programme sur chaque nœud des règles (iptables, IPVS ou nftables) qui redirigent l'IP virtuelle d'un Service vers l'un de ses Pods. Certains CNI (Cilium) le remplacent par eBPF.
+
+**Les trois interfaces d'extension.** **CRI** (runtime de conteneurs : containerd, CRI-O), **CNI** (réseau des Pods), **CSI** (stockage). Docker n'est plus un runtime supporté directement depuis Kubernetes 1.24 (retrait de *dockershim*) : les images Docker restent parfaitement utilisables.
+
+### 1.7 L'API Kubernetes
+Tout est une **ressource REST** : `GET /api/v1/namespaces/default/pods`, `POST /apis/apps/v1/namespaces/default/deployments`. Un objet est identifié par **groupe / version / type** :
+| `apiVersion` | Contient |
+|---|---|
+| `v1` (groupe « core ») | Pod, Service, ConfigMap, Secret, Namespace, PersistentVolumeClaim, Node |
+| `apps/v1` | Deployment, StatefulSet, DaemonSet, ReplicaSet |
+| `batch/v1` | Job, CronJob |
+| `networking.k8s.io/v1` | Ingress, NetworkPolicy |
+| `rbac.authorization.k8s.io/v1` | Role, ClusterRole, RoleBinding… |
+| `autoscaling/v2` | HorizontalPodAutoscaler |
+| `<groupe-crd>/v1alpha1` | vos CRD (opérateurs) |
+Versions : `alpha` (désactivées par défaut, peuvent disparaître), `beta` (activées, susceptibles d'évoluer), `v1` (stable). Des API sont **dépréciées puis retirées** à chaque version mineure : vérifiez-les avant une montée de version (`kubectl convert`, outils Pluto / kubent).
+
+**Anatomie d'un objet.** `metadata.name` (unique par type et namespace), `uid`, `resourceVersion` (verrouillage optimiste), `generation`, `labels`, `annotations`, `ownerReferences` (qui possède cet objet : suppression en cascade), `finalizers` (tâches à terminer avant suppression), `creationTimestamp`.
+
+**`watch` et `resourceVersion`.** Les contrôleurs ne font pas de sondage : ils ouvrent un flux `watch` et reçoivent les événements `ADDED/MODIFIED/DELETED`. C'est ce qui rend Kubernetes réactif.
+
+**Client-side vs server-side apply.** `kubectl apply` (côté client) calcule un patch à partir de l'annotation `last-applied-configuration`. `kubectl apply --server-side` laisse le serveur fusionner et suivre **qui possède quels champs** (`managedFields`) : indispensable quand plusieurs outils (Helm, HPA, Argo CD) touchent le même objet.
+
+### 1.8 Catalogue des objets à connaître
+| Famille | Objets | Module |
+|---|---|:---:|
+| Exécution | Pod, Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob | 02–03 |
+| Réseau | Service, EndpointSlice, Ingress, Gateway/HTTPRoute, NetworkPolicy | 04 |
+| Configuration | ConfigMap, Secret | 05 |
+| Stockage | Volume, PV, PVC, StorageClass, VolumeSnapshot | 05 |
+| Ressources | LimitRange, ResourceQuota, HPA, PriorityClass, PodDisruptionBudget | 06 |
+| Sécurité | ServiceAccount, Role, ClusterRole, bindings, Pod Security | 07 |
+| Organisation | Namespace, Node, labels/annotations | 01 |
+| Extension | CustomResourceDefinition, webhooks | 10 |
+
+### 1.9 YAML sans surprise
+- L'indentation se fait en **espaces** (jamais de tabulations), 2 par niveau par convention.
+- Les listes s'écrivent avec `- `, les maps avec `clé: valeur`.
+- Piège des types : `port: "80"` (texte) ≠ `port: 80` (nombre) ; `value: yes` / `on` / `true` deviennent des booléens ; pour une chaîne, **mettez des guillemets** (`"true"`, `"1.20"` sinon lu comme nombre 1.2).
+- Plusieurs objets dans un fichier : séparateur `---`.
+- Chaînes multi-lignes : `|` (conserve les retours à la ligne) et `>` (les replie).
+- Validez avant d'appliquer : `kubectl apply --dry-run=server -f x.yaml` (le serveur valide vraiment), `kubectl diff -f x.yaml`, `kubeconform` en CI.
+
+### 1.10 `kubectl` en profondeur
+```bash
+# Contextes et namespaces
+kubectl config get-contexts ; kubectl config use-context kind-formation
+kubectl config set-context --current --namespace=lab-x       # namespace par défaut
+# Sélection
+kubectl get pods -l app=web -o wide                          # par label
+kubectl get pods --field-selector status.phase=Running       # par champ
+kubectl get all -n lab-x                                     # (« all » n'inclut pas tout !)
+# Formats de sortie
+kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIP}{"\n"}{end}'
+kubectl get pods -o custom-columns=NOM:.metadata.name,NOEUD:.spec.nodeName,IP:.status.podIP
+kubectl get pods --sort-by=.metadata.creationTimestamp
+# Modifier
+kubectl edit deploy web                                      # ouvre l'éditeur
+kubectl patch deploy web -p '{"spec":{"replicas":3}}'        # patch fusion (strategic merge)
+kubectl set image deploy/web nginx=nginx:1.27
+kubectl label|annotate ...
+kubectl delete -f x.yaml ; kubectl delete pod -l app=web
+# Attendre
+kubectl wait --for=condition=available deploy/web --timeout=120s
+kubectl rollout status deploy/web
+# Générer sans créer
+kubectl create deployment web --image=nginx --dry-run=client -o yaml
+kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh
+```
+Autocomplétion et alias : `source <(kubectl completion bash)`, `alias k=kubectl`, `complete -o default -F __start_kubectl k`. Plugins utiles : `kubectx/kubens`, `stern` (logs multi-pods), `k9s` (interface terminal), `kubectl-neat`, `kubectl-tree` (arbre des `ownerReferences`).
+
+### 1.11 Namespaces : ce qu'ils isolent… et ce qu'ils n'isolent pas
+Ils isolent les **noms** (deux `web` dans deux namespaces), les **droits** (RBAC par namespace), les **quotas** et, avec NetworkPolicy, les flux. Ils **n'isolent pas** le réseau par défaut (tout Pod joint tout Pod), ni les nœuds (les Pods de tous les namespaces partagent les mêmes machines et le même noyau). Namespaces système : `kube-system`, `kube-public`, `kube-node-lease`, `default` (à ne pas utiliser pour de vraies applications). Certaines ressources ne sont **pas** namespacées (`Node`, `PersistentVolume`, `StorageClass`, `ClusterRole`, `Namespace`) : `kubectl api-resources --namespaced=false`.
+
+### 1.12 Erreurs fréquentes des débutants
+| Erreur | Explication | Correctif |
+|---|---|---|
+| Éditer un Pod créé par un Deployment | le Deployment remettra l'ancienne version | modifier le Deployment |
+| Oublier `-n namespace` | commande exécutée dans `default` | fixer le namespace du contexte |
+| `kubectl apply` après `kubectl edit` / `scale` | divergence entre le fichier et le cluster | tout passer par les fichiers |
+| Utiliser `latest` comme tag | image non reproductible, comportement de pull variable | tag précis ou digest |
+| Confondre `port`, `targetPort`, `containerPort`, `nodePort` | voir module 04 | schéma du module 04 |
+| Supprimer un Pod pour « relancer » une mise à jour de config | non maîtrisé | `kubectl rollout restart` |
+| Penser que `Running` = application prête | seule la **readiness** le dit | configurer les probes (module 06) |
+
 ## 2. 🎬 Démo (20 min) — « Ce qui se passe quand on crée un Deployment »
 
 ```bash
