@@ -38,6 +38,104 @@ Le lien Service → Pods se fait par `selector` ; si aucun Pod ne matche, l'`End
 ### 1.5 NetworkPolicy
 Par défaut tout est ouvert. Dès qu'une policy **sélectionne** un Pod, seul le trafic autorisé passe (pour les directions `Ingress`/`Egress` listées). Bonne pratique : **default deny** puis autoriser explicitement (+ DNS en egress).
 
+### 1.6 Chemin d'un paquet : de l'extérieur au conteneur
+```
+Client ─► LoadBalancer (IP externe) ─► Node:NodePort ─► kube-proxy (iptables/IPVS/nftables) ─► Pod (IP du réseau CNI) ─► conteneur:targetPort
+                                     ▲ ClusterIP (IP virtuelle, n'existe sur aucune interface : simple règle DNAT)
+```
+- Un **ClusterIP** n'est *pas* une adresse que l'on peut « pinger » : c'est une règle de redirection. Elle n'est joignable que depuis le cluster.
+- Les Services de type `NodePort` et `LoadBalancer` **incluent** un ClusterIP.
+- `externalTrafficPolicy: Local` conserve l'IP source du client et évite un saut réseau, mais ne distribue qu'aux Pods du nœud recevant le trafic.
+- `sessionAffinity: ClientIP` colle un client au même Pod (par défaut, répartition quasi aléatoire).
+
+### 1.7 Les quatre « ports » à ne pas confondre
+| Champ | Où | Signification |
+|---|---|---|
+| `containerPort` | Pod | port d'écoute du conteneur (indicatif, documentation) |
+| `port` | Service | port exposé par le Service (celui que l'on appelle) |
+| `targetPort` | Service | port du Pod vers lequel rediriger (numéro ou **nom** de port) |
+| `nodePort` | Service NodePort | port ouvert sur chaque nœud (30000–32767) |
+Erreur fréquente : `targetPort` différent du port réel d'écoute → « connection refused ». Utilisez des **ports nommés** (`name: http`) pour que Service et Pod restent cohérents.
+
+### 1.8 Endpoints et EndpointSlices
+Le contrôleur d'EndpointSlices maintient, pour chaque Service, la liste des IP:port des Pods **Ready** qui correspondent au `selector`. kube-proxy (ou le CNI) lit ces objets. Diagnostic n°1 d'un Service qui ne répond pas :
+```bash
+kubectl get endpointslices -l kubernetes.io/service-name=web
+kubectl get pods --show-labels                 # les labels correspondent-ils au selector ?
+kubectl describe svc web                       # Endpoints: <none> ?
+```
+Un Pod non Ready (readiness en échec) est retiré des endpoints : c'est le comportement voulu pour ne pas lui envoyer de trafic.
+
+### 1.9 DNS en détail
+- CoreDNS (Deployment dans `kube-system`) est configuré par le ConfigMap `coredns` (Corefile) ; les Pods reçoivent l'IP du service `kube-dns` dans `/etc/resolv.conf`.
+- `ndots:5` : tout nom contenant moins de 5 points est d'abord essayé avec chaque domaine de recherche, ce qui multiplie les requêtes pour les noms externes. Utiliser un nom **complet terminé par un point** (`api.exemple.com.`) ou réduire `ndots` via `dnsConfig` dans les applications très sollicitées.
+- `dnsPolicy` : `ClusterFirst` (défaut), `Default` (hérite du nœud), `None` (configuration manuelle via `dnsConfig`).
+- Enregistrements SRV pour les ports nommés : `_http._tcp.web.ns.svc.cluster.local`.
+- Un Service headless renvoie **toutes** les IP des Pods (enregistrements A multiples) ; avec un StatefulSet, chaque Pod a son propre enregistrement.
+- Pannes DNS typiques : CoreDNS saturé, NetworkPolicy qui bloque l'egress UDP/TCP 53, boucle de résolution.
+
+### 1.10 Ingress : fonctionnement et limites
+- Un objet `Ingress` est une **déclaration** ; seul un **Ingress Controller** (ingress-nginx, Traefik, HAProxy, Contour, contrôleurs des clouds) la rend effective. Sélection par `ingressClassName`.
+- Règles : `host` + `path` (`pathType: Prefix | Exact | ImplementationSpecific`) → `backend.service`.
+- TLS : `spec.tls[].secretName` (Secret `kubernetes.io/tls`) ; **cert-manager** automatise l'émission et le renouvellement (Let's Encrypt).
+- Les fonctions avancées (redirections, réécritures, limitation de débit, authentification) passent par des **annotations propres à chaque contrôleur** : non portables. C'est une limite majeure de l'API Ingress.
+- Un Ingress est typiquement exposé via **un** Service LoadBalancer devant le contrôleur : un seul point d'entrée pour de nombreuses applications (économie d'IP et de coûts).
+> Vérifiez l'état de maintenance du contrôleur choisi : l'écosystème évolue (le projet ingress-nginx de la communauté a annoncé son arrêt de maintenance), ce qui renforce l'intérêt de **Gateway API** pour les nouveaux projets.
+
+### 1.11 Gateway API : le modèle de rôles
+| Objet | Géré par | Rôle |
+|---|---|---|
+| `GatewayClass` | fournisseur d'infra | type d'implémentation (Envoy, Istio, Cilium…) |
+| `Gateway` | équipe plateforme | points d'entrée : ports, protocoles, TLS, namespaces autorisés |
+| `HTTPRoute` / `GRPCRoute` / `TCPRoute` | équipes applicatives | règles de routage vers leurs Services |
+Atouts : routage par en-têtes, pondération (canary), redirections, réécritures **dans la spec** (pas d'annotations), partage d'un Gateway entre équipes avec contrôle (`allowedRoutes`), `ReferenceGrant` pour autoriser les références inter-namespaces.
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: web}
+spec:
+  parentRefs: [{name: public-gw}]
+  hostnames: ["web.exemple.com"]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /api}}]
+      backendRefs:
+        - {name: api-v1, port: 80, weight: 90}
+        - {name: api-v2, port: 80, weight: 10}      # canary 10 %
+```
+
+### 1.12 NetworkPolicy : bien les écrire
+- Une policy est **additive** : l'union des règles de toutes les policies qui sélectionnent un Pod est autorisée.
+- `podSelector: {}` sélectionne tous les Pods du namespace ; `policyTypes` précise `Ingress` et/ou `Egress`.
+- Sélecteurs de pairs : `podSelector`, `namespaceSelector` (label `kubernetes.io/metadata.name` automatique), `ipBlock` (CIDR). **Attention** : `podSelector` et `namespaceSelector` dans le **même** élément = ET ; dans deux éléments distincts = OU.
+- Ne pas oublier l'**egress DNS** (UDP/TCP 53 vers `kube-system`) dès qu'on restreint la sortie.
+- Modèle de départ sûr :
+```yaml
+# 1. Tout interdire (entrée) dans le namespace
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata: {name: default-deny-ingress}
+spec: {podSelector: {}, policyTypes: [Ingress]}
+---
+# 2. Autoriser front → api sur 8080
+kind: NetworkPolicy
+apiVersion: networking.k8s.io/v1
+metadata: {name: api-from-front}
+spec:
+  podSelector: {matchLabels: {app: api}}
+  ingress:
+    - from: [{podSelector: {matchLabels: {app: front}}}]
+      ports: [{port: 8080}]
+```
+- Tester : `kubectl exec` + `curl`/`nc` depuis un Pod autorisé et depuis un Pod non autorisé ; outils : `cilium connectivity test`, Hubble, `netshoot`.
+- Les NetworkPolicy standard sont L3/L4 : les règles L7 (méthodes HTTP, FQDN) relèvent des CRD du CNI (CiliumNetworkPolicy) ou d'un service mesh.
+
+### 1.13 Maillage de services (service mesh) en bref
+Istio, Linkerd, Cilium Service Mesh ajoutent : mTLS automatique entre services, politiques d'autorisation L7, observabilité fine (traces, métriques RED), résilience (retries, timeouts, disjoncteurs), routage avancé. Coût : complexité opérationnelle et consommation de ressources (sidecars ou mode *ambient*). À envisager quand ces besoins sont avérés, pas par défaut.
+
+### 1.14 Dépannage réseau : méthode
+1. **Le Pod est-il Ready ?** (`get pods`) 2. **Le Service a-t-il des endpoints ?** 3. **Le DNS répond-il ?** (`nslookup web` depuis un Pod) 4. **Le port est-il bon ?** (`curl pod-ip:targetPort` depuis un Pod voisin) 5. **Une NetworkPolicy bloque-t-elle ?** 6. **Ingress/Gateway** : logs du contrôleur, hôte/chemin, backend. 7. **Nœud/CNI** : pods CNI, `kubectl get nodes`, MTU.
+Image de diagnostic pratique : `kubectl run net --rm -it --image=nicolaka/netshoot -- bash` (dig, curl, tcpdump, ss…).
+
 ## 2. 🎬 Démo (40 min)
 
 Prérequis : `make ingress` (depuis la racine).

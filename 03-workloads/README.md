@@ -34,6 +34,88 @@ Autres : blue/green (2 Deployments + bascule du Service), canary (Argo Rollouts 
 
 StatefulSet : Pods `nom-0`, `nom-1`…, DNS stable `nom-0.svc`, `volumeClaimTemplates` (un PVC par Pod), démarrage ordonné.
 
+### 1.4 Deployment : ce qui se passe réellement
+Un Deployment ne gère **pas** les Pods : il gère des **ReplicaSets**. Le `pod-template-hash` est un hash du `spec.template` ajouté en label ; toute modification du *template* (image, variables, ressources…) crée un nouveau ReplicaSet, alors qu'un changement de `replicas` ne touche que le ReplicaSet courant. Pour un rolling update :
+```
+RS-v1 : 4 → 3 → 2 → 1 → 0
+RS-v2 : 0 → 1 → 2 → 3 → 4
+```
+à chaque étape, Kubernetes respecte `maxSurge` (Pods en plus du souhaité, 25 % par défaut) et `maxUnavailable` (Pods manquants tolérés, 25 % par défaut) — mais **uniquement des Pods Ready** : la **readiness probe** conditionne la progression. Sans readiness probe, Kubernetes considère les Pods prêts dès qu'ils tournent et une mise à jour défaillante peut remplacer tous les Pods sains.
+
+| Champ | Rôle | Conseil |
+|---|---|---|
+| `minReadySeconds` | durée pendant laquelle un Pod doit rester Ready avant d'être compté | 5–30 s pour détecter les plantages précoces |
+| `progressDeadlineSeconds` | délai (600 s) avant de déclarer le déploiement bloqué (`ProgressDeadlineExceeded`) | adapter au temps de démarrage |
+| `revisionHistoryLimit` | nombre d'anciens ReplicaSets conservés pour le rollback | 3–10 |
+| `strategy.rollingUpdate` | rythme du remplacement | `maxUnavailable: 0` pour ne jamais perdre de capacité |
+
+**Un rollout ne se bloque pas par magie** : avec `maxUnavailable: 0`, si les nouveaux Pods ne deviennent jamais Ready, l'ancienne version continue de servir : le service est préservé, le déploiement reste « en cours ». C'est la raison d'être des probes.
+
+### 1.5 Pièges des mises à jour
+- **Changer un ConfigMap ne redémarre pas** les Pods. Techniques : `kubectl rollout restart deploy/x`, ou nommer le ConfigMap avec un hash (Kustomize `configMapGenerator`, Helm `checksum/config` en annotation), ou le monter en volume et recharger à chaud.
+- **Tag `latest`** : un `apply` identique ne déclenche aucun rollout (le template n'a pas changé).
+- **Connexions longues** : un Pod `Terminating` coupe les connexions existantes ; prévoir SIGTERM gracieux et `preStop`.
+- **Migrations de base de données** : le schéma doit rester compatible avec l'ancienne **et** la nouvelle version pendant le rollout (pattern *expand/contract*).
+- **Données partagées** : deux versions de l'application coexistent forcément ; sinon utiliser `Recreate`.
+
+### 1.6 Stratégies de livraison avancées
+| Stratégie | Principe | Mise en œuvre |
+|---|---|---|
+| **Rolling update** | remplacement progressif | natif |
+| **Recreate** | arrêt puis redémarrage | natif, avec coupure |
+| **Blue/Green** | deux environnements complets, bascule du Service | 2 Deployments + changement du `selector` ; retour arrière immédiat, coût double |
+| **Canary** | une fraction du trafic vers la nouvelle version | 2 Deployments (nombre de réplicas ≈ pourcentage) ou Ingress/Gateway pondéré ; **Argo Rollouts / Flagger** pour l'analyse automatique |
+| **Feature flags** | découpler déploiement et activation | côté application |
+Critère de choix : un retour arrière doit être **rapide, simple et testé**.
+
+### 1.7 StatefulSet en profondeur
+- **Identité stable** : nom `<sts>-<ordinal>`, DNS `<pod>.<service-headless>`, volume dédié (`volumeClaimTemplates` → PVC `data-<sts>-<n>`).
+- **Ordre** : `podManagementPolicy: OrderedReady` (défaut : démarrage séquentiel 0, 1, 2 ; arrêt inverse) ou `Parallel`.
+- **Mises à jour** : `RollingUpdate` (du plus grand ordinal au plus petit) avec `partition` pour faire un *canary* (seuls les Pods d'ordinal ≥ partition sont mis à jour) ; `OnDelete` pour un contrôle manuel.
+- **Suppression** : supprimer ou réduire un StatefulSet **ne supprime pas** les PVC (protection des données) ; `persistentVolumeClaimRetentionPolicy` permet de changer ce comportement (`whenDeleted`, `whenScaled`).
+- **Ce qu'un StatefulSet ne fait pas** : sauvegarde, réplication des données, élection de leader, bascule : c'est le travail de l'application ou d'un **opérateur** (CloudNativePG, Strimzi…). Exécuter une base en StatefulSet « à la main » n'est raisonnable que si l'on maîtrise ces aspects.
+
+### 1.8 DaemonSet en profondeur
+Cas d'usage : collecte de logs (Fluent Bit, Alloy), métriques (node-exporter), réseau (CNI, kube-proxy), stockage (CSI node), sécurité (Falco). Particularités : pas de champ `replicas` ; un Pod par nœud **éligible** (`nodeSelector`, affinité, tolerations) ; les nouveaux nœuds reçoivent automatiquement le Pod. Mise à jour : `RollingUpdate` avec `maxUnavailable` (nœuds mis à jour en parallèle) ; `OnDelete` pour une maîtrise totale. Les DaemonSets système tolèrent généralement les taints (`operator: Exists`) pour tourner partout, control plane compris.
+
+### 1.9 Job et CronJob en profondeur
+**Job**
+| Champ | Rôle |
+|---|---|
+| `completions` | nombre de réussites nécessaires |
+| `parallelism` | Pods simultanés |
+| `backoffLimit` | tentatives avant échec (6 par défaut), délai exponentiel |
+| `activeDeadlineSeconds` | durée maximale totale |
+| `ttlSecondsAfterFinished` | nettoyage automatique du Job et de ses Pods |
+| `completionMode: Indexed` | chaque Pod reçoit un index (`JOB_COMPLETION_INDEX`) : traitement de lots partitionnés |
+| `restartPolicy` | obligatoirement `OnFailure` ou `Never` (jamais `Always`) |
+Un Job doit être **idempotent** : une tentative peut être rejouée, voire exécutée deux fois dans de rares cas.
+
+**CronJob**
+| Champ | Rôle |
+|---|---|
+| `schedule` | syntaxe cron (`*/5 * * * *`) ; fuseau UTC par défaut, `timeZone` (GA 1.27) pour un autre |
+| `concurrencyPolicy` | `Allow` (défaut), `Forbid` (saute si le précédent tourne), `Replace` |
+| `startingDeadlineSeconds` | délai de rattrapage si une exécution a été manquée |
+| `successfulJobsHistoryLimit` / `failedJobsHistoryLimit` | historique conservé (3 / 1 par défaut) |
+| `suspend` | mise en pause |
+Attention : au-delà de 100 exécutions manquées consécutives, le CronJob cesse de planifier. Un CronJob n'est pas un orchestrateur de workflows (dépendances, reprise) : pour cela, Argo Workflows, Airflow, Tekton.
+
+### 1.10 Choisir son contrôleur : arbre de décision
+```
+Mon programme s'arrête-t-il de lui-même ?
+├─ Oui ── à intervalles réguliers ? ── Oui → CronJob      Non → Job
+└─ Non (service permanent)
+     ├─ un Pod par nœud ? ───────────────────────────── DaemonSet
+     ├─ identité/volume/ordre par réplica ? ──────────── StatefulSet (ou opérateur)
+     └─ sinon (stateless) ─────────────────────────────── Deployment
+```
+
+### 1.11 Dimensionner le nombre de réplicas
+- **Disponibilité** : au moins 2 réplicas pour tout service critique, répartis sur des nœuds/zones différents (anti-affinity, topologySpread, module 06) ; un **PodDisruptionBudget** protège lors des maintenances.
+- **Capacité** : répartir la charge sur N réplicas = chaque Pod porte 1/N ; en cas de perte d'un Pod, les autres doivent absorber 1/(N-1).
+- **Élasticité** : HPA (module 06) ajuste `replicas` ; dans ce cas, **ne pas** fixer `replicas` dans le manifeste appliqué par GitOps (sinon conflit).
+
 ## 2. 🎬 Démo (30 min)
 
 ```bash

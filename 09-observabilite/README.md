@@ -43,6 +43,88 @@ Nœud NotReady          → kubelet (journalctl), runtime, disque/mémoire, CNI
 ```
 Réflexe : **`get` → `describe` (Events) → `logs` → `exec`/`debug` → événements → nœud**.
 
+### 1.5 Les types de métriques Prometheus
+| Type | Description | Exemple | Requête type |
+|---|---|---|---|
+| **Counter** | ne fait qu'augmenter (redémarre à 0) | `http_requests_total` | `rate(...[5m])` |
+| **Gauge** | monte et descend | `memory_usage_bytes`, `queue_length` | valeur brute, `avg_over_time` |
+| **Histogram** | répartition en *buckets* + somme + compte | `http_request_duration_seconds_bucket` | `histogram_quantile(0.95, …)` |
+| **Summary** | quantiles calculés côté client | rarement préférable à l'histogramme | — |
+Règles : un counter se lit toujours avec `rate()`/`increase()` ; les quantiles d'histogrammes s'agrègent, pas ceux des summaries ; **attention à la cardinalité** : chaque combinaison de labels crée une série (ne jamais mettre d'identifiant utilisateur ou d'URL complète en label).
+
+### 1.6 Dans le cluster : qui expose quoi ?
+| Source | Expose | Exemples de métriques |
+|---|---|---|
+| **kubelet / cAdvisor** | consommation par conteneur | `container_cpu_usage_seconds_total`, `container_memory_working_set_bytes` |
+| **kube-state-metrics** | état des objets API | `kube_pod_status_phase`, `kube_deployment_status_replicas_available`, `kube_pod_container_status_restarts_total` |
+| **node-exporter** | métriques de l'OS du nœud | `node_cpu_seconds_total`, `node_filesystem_avail_bytes` |
+| **metrics-server** | métriques « instantanées » pour `kubectl top` et l'HPA | (API `metrics.k8s.io`) |
+| **Composants du control plane** | API server, etcd, scheduler | `apiserver_request_duration_seconds`, `etcd_server_has_leader` |
+| **Applications** | métriques métier et techniques | via bibliothèques client + `/metrics` |
+**Découverte** : avec le Prometheus Operator, un `ServiceMonitor` (sélecteur de Service + port) ou un `PodMonitor` déclare quoi scraper ; les règles d'alerte sont des `PrometheusRule`. Le label `release: <nom-du-chart>` est souvent requis pour que Prometheus les sélectionne (piège classique : « ma cible n'apparaît pas »).
+
+### 1.7 Alerter intelligemment
+Principes d'une bonne alerte :
+- elle signale un **symptôme ressenti par l'utilisateur** (erreurs, latence) plutôt qu'une cause supposée (CPU à 80 %) ;
+- elle est **actionnable** : un humain sait quoi faire, avec un lien vers un runbook ;
+- elle est **urgente** si elle réveille quelqu'un ; sinon, un ticket ;
+- elle évite le bruit : durée `for: 5m`, regroupement, inhibition.
+```yaml
+- alert: HighErrorRate
+  expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+  for: 10m
+  labels: {severity: page}
+  annotations:
+    summary: "Plus de 5 % d'erreurs 5xx"
+    runbook_url: https://wiki.exemple.com/runbooks/high-error-rate
+```
+**Alertmanager** gère le routage (par `severity`, `team`), le regroupement (`group_by`), la mise en silence et l'inhibition, vers Slack, PagerDuty, e-mail.
+**SLO et budget d'erreur** : définir un objectif (99,9 % de requêtes réussies sur 30 jours), mesurer des **SLI**, alerter sur la **vitesse de consommation du budget** (burn rate) plutôt que sur chaque pic.
+
+### 1.8 Logs : bonnes pratiques
+- Écrire sur **stdout/stderr**, en **JSON structuré** (niveau, horodatage, identifiant de requête/trace) ; ne pas écrire de fichiers dans le conteneur.
+- Ne jamais journaliser de secrets ni de données personnelles.
+- Pile typique : agent en DaemonSet (**Alloy, Promtail, Fluent Bit, Vector**) → **Loki** (index par labels, stockage objet bon marché) ou Elasticsearch/OpenSearch.
+- Requêtes LogQL : `{namespace="app", app="api"} |= "error" | json | level="error"`, `rate({app="api"} |= "error"[5m])`.
+- Rétention et coûts : filtrer à la source, échantillonner, durées différentes par criticité.
+- `kubectl logs` : `-f` (suivi), `--previous`, `--since=10m`, `-c conteneur`, `-l app=web --all-containers --prefix`, `stern` pour agréger plusieurs Pods. La rotation sur le nœud limite ce que `kubectl logs` voit.
+
+### 1.9 Traces distribuées
+Une **trace** suit une requête à travers plusieurs services ; un **span** est une étape. **OpenTelemetry** (standard) instrumente les applications (SDK ou auto-instrumentation via l'opérateur OTel) et envoie les données via un **Collector** vers Tempo, Jaeger, ou un service commercial. Propager l'identifiant de trace (en-tête `traceparent`) et l'inscrire dans les logs permet de passer d'une alerte → trace → logs de la requête fautive.
+
+### 1.10 Événements Kubernetes
+`kubectl get events --sort-by=.lastTimestamp` : raisons (`Scheduled`, `Pulled`, `FailedScheduling`, `BackOff`, `Unhealthy`, `Evicted`, `OOMKilling`…). Les événements sont **éphémères** (≈ 1 h) : pour l'historique, exportez-les (kubernetes-event-exporter, Alloy) vers Loki/Elasticsearch. Ils sont aussi une source d'alertes précieuse.
+
+### 1.11 Dashboards utiles à construire
+1. **Vue cluster** : nœuds Ready, saturation CPU/mémoire/disque, Pods non Ready, Pods Pending, redémarrages.
+2. **Vue namespace/application** : réplicas disponibles vs désirés, requests vs usage, redémarrages, OOMKilled.
+3. **Vue service (RED)** : débit, taux d'erreur, latence p50/p95/p99.
+4. **Vue ressources (USE)** : utilisation, saturation, erreurs des nœuds et volumes.
+5. **Vue control plane** : latence de l'API, taille d'etcd, file d'attente du scheduler.
+Éviter les « murs de graphiques » : chaque dashboard répond à une question précise.
+
+### 1.12 Outils de diagnostic interactif
+```bash
+kubectl top pods --containers --sort-by=memory
+kubectl debug -it pod/api --image=busybox:1.36 --target=api          # conteneur éphémère
+kubectl debug node/worker1 -it --image=ubuntu                        # shell sur le nœud (chroot /host)
+kubectl debug pod/api --copy-to=api-debug --container=api -- sleep 1d  # copie modifiable du Pod
+kubectl get pod api -o jsonpath='{.status.containerStatuses[0].lastState}'
+kubectl get --raw /metrics | head                                    # métriques de l'API server
+kubectl auth can-i ... ; kubectl get events -A --field-selector type=Warning
+```
+**k9s**, **Lens** et **Headlamp** offrent une vue interactive ; **Hubble** (Cilium) et **Pixie** donnent de la visibilité réseau/applicative sans modifier le code.
+
+### 1.13 Études de cas : du symptôme à la cause
+| Symptôme | Hypothèses | Vérifications |
+|---|---|---|
+| Latence en hausse | saturation CPU (throttling), base lente, GC, réseau | `container_cpu_cfs_throttled_*`, traces, métriques de la base |
+| Redémarrages en boucle | OOMKilled, liveness trop stricte, config manquante | code de sortie, `logs --previous`, événements |
+| 503 intermittents après déploiement | readiness absente, arrêt non gracieux | probes, `preStop`, journaux du contrôleur d'Ingress |
+| Pods `Pending` | requests > capacité, quota atteint, taints | `describe pod`, `describe node`, ResourceQuota |
+| Nœud `NotReady` | kubelet arrêté, disque plein, pression mémoire, CNI | `journalctl -u kubelet`, `df -h`, conditions du nœud |
+| Disque du nœud plein | logs, images inutilisées, `emptyDir` | `crictl images`, nettoyage (GC kubelet), quotas éphémères |
+
 ## 2. 🎬 Démo (45 min)
 
 ```bash
