@@ -1,6 +1,6 @@
 # Guide du formateur
 
-**Formateur** : Ingénieur DevOps & Intégrateur – Kubernetes
+**Formateur** : NZEMBOUONG Patrick — Ingénieur DevOps & Intégrateur – Kubernetes
 
 ## 1. Planning type — 5 jours (7 h/jour)
 
