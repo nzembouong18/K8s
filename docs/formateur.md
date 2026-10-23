@@ -1,5 +1,7 @@
 # Guide du formateur
 
+**Formateur** : Ingénieur DevOps & Intégrateur – Kubernetes
+
 ## 1. Planning type — 5 jours (7 h/jour)
 
 | Jour | Matin (9h-12h30) | Après-midi (13h30-17h) |

@@ -2,6 +2,7 @@
 
 Formation pratique, **100 % open source**, orientée *labs*. Chaque module contient : un **cours**, une **démo** (formateur), des **labos** (apprenants) avec **corrigés**, et un **quiz**.
 
+- **Formateur** : Ingénieur DevOps & Intégrateur – Kubernetes
 - **Durée** : 5 jours (≈ 35 h) — ou 10 demi-journées en format distanciel
 - **Public** : développeurs, admins système, DevOps/SRE, architectes
 - **Niveau** : débutant → intermédiaire → avancé (préparation CKAD / CKA incluse)
