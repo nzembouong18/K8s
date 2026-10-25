@@ -166,9 +166,8 @@ Créez trois Pods : `qos-g` (Guaranteed), `qos-b` (Burstable), `qos-be` (BestEff
 <details><summary>Corrigé</summary>
 
 ```bash
-kubectl run qos-be --image=nginx:1.27
-kubectl run qos-b --image=nginx:1.27 --requests='cpu=100m'
-kubectl run qos-g --image=nginx:1.27 --requests='cpu=100m,memory=64Mi' --limits='cpu=100m,memory=64Mi'
+kubectl run qos-be --image=nginx:1.27                     # BestEffort
+kubectl apply -f manifests/07-qos.yaml                    # qos-b (Burstable) et qos-g (Guaranteed)
 kubectl get pods -o custom-columns=N:.metadata.name,QOS:.status.qosClass
 ```
 </details>

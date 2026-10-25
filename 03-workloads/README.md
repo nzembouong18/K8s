@@ -156,7 +156,7 @@ kubectl apply -f manifests/05-cronjob.yaml && kubectl get cronjob,jobs -w
 ```bash
 kubectl apply -f manifests/01-deployment.yaml
 kubectl scale deploy web --replicas=5 ; kubectl scale deploy web --replicas=2
-kubectl delete pod $(kubectl get pods -l app=web -o name | head -1)
+kubectl delete $(kubectl get pods -l app=web -o name | head -1)
 ```
 Le ReplicaSet recrée un Pod : nouveau Pod = nouveau nom (suffixe aléatoire) et nouvelle IP.
 </details>
@@ -229,7 +229,7 @@ Voir `manifests/05-cronjob.yaml`.
 </details>
 
 ### Lab 3.8 ⭐⭐⭐ — Blue/Green avec deux Deployments
-Créez `app-blue` (nginx:1.26, label `version=blue`) et `app-green` (nginx:1.27, `version=green`) derrière un Service qui sélectionne `version=blue`. Basculez sur green avec un `kubectl patch svc` — sans coupure. (Nécessite le module 04 pour le Service ; fait en fil rouge.)
+(Manifests fournis : `manifests/06-bluegreen.yaml`.) Déployez `app-blue` (label `version=blue`) et `app-green` (`version=green`), deux versions de l'application (images `whoami` qui affichent `VERSION-BLUE` / `VERSION-GREEN`), derrière un Service qui sélectionne `version=blue`. Basculez sur green avec un `kubectl patch svc` — sans coupure. Vérifiez avant/après avec `kubectl run tmp --rm -it --image=curlimages/curl --restart=Never -- curl -s app` (la page indique la version).
 
 <details><summary>Corrigé</summary>
 

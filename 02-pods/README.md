@@ -205,6 +205,7 @@ Voir `manifests/05-pod-sidecar.yaml`.
 </details>
 
 ### Lab 2.6 ⭐⭐⭐ — Arrêt gracieux
+(Manifests fournis : `manifests/07-pods-sigterm.yaml`, deux Pods `avec-trap` et `sans-trap`.)
 Créez un Pod qui intercepte SIGTERM (`trap`), affiche « arrêt propre » puis quitte. Supprimez-le et mesurez le temps ; refaites en retirant le `trap` : que constatez-vous (30 s) ? Pourquoi ?
 
 <details><summary>Corrigé</summary>

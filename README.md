@@ -58,7 +58,7 @@ Nettoyage d'un module : `kubectl delete ns <namespace-du-module>` — chaque mod
 1. **Comprendre** (cours, 20-30 %) — schémas et concepts, peu de slides
 2. **Voir** (démo, 20 %) — le formateur exécute, les apprenants suivent
 3. **Faire** (labos, 50-60 %) — énoncé + indices + corrigé repliable
-4. **Vérifier** (quiz + `make check-<module>`)
+4. **Vérifier** (quiz, corrigés, et `make check` pour l'environnement)
 
 Les labos sont gradués : ⭐ guidé · ⭐⭐ semi-guidé · ⭐⭐⭐ autonome (énoncé seul, corrigé en fin de module).
 
