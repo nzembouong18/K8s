@@ -155,8 +155,8 @@ kubectl apply -f manifests/02-ingress.yaml
 curl -H 'Host: web.local' http://localhost/
 curl -H 'Host: web.local' http://localhost/api
 
-# NetworkPolicy
-kubectl apply -f manifests/03-netpol.yaml
+# NetworkPolicy (lab-netpol, voir Lab 4.7)
+kubectl apply -f manifests/05-trois-tiers.yaml -f manifests/03-netpol.yaml     # crée aussi le namespace
 ```
 
 ## 3. 🧪 Labos
@@ -222,10 +222,17 @@ kubectl run tmp --rm -it --image=busybox:1.36 --restart=Never -- nslookup db-0.d
 </details>
 
 ### Lab 4.7 ⭐⭐⭐ — NetworkPolicy « 3 tiers »
-Trois Deployments `frontend`, `backend`, `db` (labels `tier`). Règles : tout interdit par défaut ; `frontend` → `backend` (8080) ; `backend` → `db` (5432) ; DNS autorisé. Prouvez par `curl`/`nc` que `frontend` ne peut pas joindre `db`.
+Dans un namespace dédié `lab-netpol` (pour ne pas casser les autres labs), déployez les trois tiers avec `manifests/05-trois-tiers.yaml` (`frontend`, `backend`, `db`, label `tier`). Règles : tout interdit par défaut ; `frontend` → `backend` (8080) ; `backend` → `db` (5432) ; DNS autorisé. Prouvez par `curl`/`nc` que `frontend` ne peut pas joindre `db`.
 
 <details><summary>Corrigé</summary>
-Voir `manifests/03-netpol.yaml`.
+Voir `manifests/03-netpol.yaml` (namespace `lab-netpol`). Tests :
+```bash
+kubectl apply -f manifests/05-trois-tiers.yaml                         # crée le namespace lab-netpol
+kubectl apply -f manifests/03-netpol.yaml                               # appliquer APRÈS avoir testé l'état « tout ouvert »
+kubectl -n lab-netpol exec deploy/frontend -- curl -s -m 3 backend:8080      # OK
+kubectl -n lab-netpol exec deploy/frontend -- curl -s -m 3 db:5432           # timeout (bloqué)
+kubectl -n lab-netpol exec deploy/backend -c client -- curl -s -m 3 db:5432           # OK
+```
 ⚠ Avec kindnet les policies ne sont **pas appliquées** : installer Calico (`kind` avec `disableDefaultCNI: true`) ou Cilium pour valider. À défaut, relire/valider le YAML avec `kubectl apply --dry-run=server`.
 </details>
 
@@ -243,4 +250,4 @@ Voir `manifests/04-gateway-api.yaml` (nécessite les CRD).
 4. Une NetworkPolicy sans CNI compatible ? → silencieusement ignorée.
 5. FQDN d'un Service `api` dans `prod` ? → `api.prod.svc.cluster.local`.
 
-Nettoyage : `kubectl delete ns lab-reseau`
+Nettoyage : `kubectl delete ns lab-reseau lab-netpol`

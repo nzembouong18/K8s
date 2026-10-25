@@ -88,7 +88,7 @@ roleRef: {kind: Role, name: pod-reader, apiGroup: rbac.authorization.k8s.io}
 | **Pod Security Admission** (intégré) | 3 profils prédéfinis par namespace | socle de sécurité des Pods |
 | **ValidatingAdmissionPolicy** (CEL, intégré, GA 1.30) | règles en expression CEL, sans webhook | politiques simples et rapides |
 | **Kyverno** | politiques en YAML : valider, **muter**, **générer**, vérifier les signatures | équipes qui préfèrent le YAML |
-| **OPA Gatekeeper** | Rego | si OPA est déjà un standard (module Terraform 16 en commun) |
+| **OPA Gatekeeper** | Rego | si OPA est déjà un standard dans votre organisation |
 Exemples de règles : interdire `latest`, imposer des `requests/limits`, des labels de propriétaire, un registre autorisé, `runAsNonRoot`, interdire `hostNetwork`. Déployer d'abord en mode **audit/warn**, puis `enforce`.
 
 ### 1.10 Pod Security Standards en détail

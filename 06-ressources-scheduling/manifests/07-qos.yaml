@@ -1,0 +1,26 @@
+# Lab 6.1 : deux Pods, deux classes QoS (le troisième, BestEffort, se crée avec `kubectl run`)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-b                     # Burstable : requests < limits (ou seulement des requests)
+  namespace: lab-ressources
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.27
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}
+        limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-g                     # Guaranteed : requests = limits (CPU et mémoire)
+  namespace: lab-ressources
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.27
+      resources:
+        requests: {cpu: 100m, memory: 64Mi}
+        limits: {cpu: 100m, memory: 64Mi}

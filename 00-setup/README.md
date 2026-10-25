@@ -44,7 +44,7 @@
 | Ports 80/443 déjà utilisés | autre service local | changer les `hostPort` du fichier kind |
 | Erreur de quota `inotify` (Linux) | limites système basses | augmenter `fs.inotify.max_user_watches` / `max_user_instances` |
 
-**Hygiène de laboratoire.** Un cluster jetable se recrée en 2 minutes : n'hésitez pas à `make clean && make cluster` après une expérience qui a mal tourné — c'est le gros avantage d'un environnement éphémère. Prenez l'habitude de travailler dans un **namespace par labo** et de le supprimer ensuite.
+**Hygiène de laboratoire.** Un cluster jetable se recrée en 2 minutes : n'hésitez pas à `make delete && make cluster` après une expérience qui a mal tourné — c'est le gros avantage d'un environnement éphémère. Prenez l'habitude de travailler dans un **namespace par labo** et de le supprimer ensuite.
 
 ## 2. Installation
 

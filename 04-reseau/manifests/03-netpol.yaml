@@ -3,7 +3,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: default-deny-all
-  namespace: lab-reseau
+  namespace: lab-netpol
 spec:
   podSelector: {}
   policyTypes: [Ingress, Egress]
@@ -12,7 +12,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: allow-dns
-  namespace: lab-reseau
+  namespace: lab-netpol
 spec:
   podSelector: {}
   policyTypes: [Egress]
@@ -29,7 +29,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: frontend-to-backend
-  namespace: lab-reseau
+  namespace: lab-netpol
 spec:
   podSelector:
     matchLabels: {tier: backend}
@@ -45,7 +45,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: frontend-egress-backend
-  namespace: lab-reseau
+  namespace: lab-netpol
 spec:
   podSelector:
     matchLabels: {tier: frontend}
@@ -61,7 +61,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: backend-to-db
-  namespace: lab-reseau
+  namespace: lab-netpol
 spec:
   podSelector:
     matchLabels: {tier: db}
@@ -77,7 +77,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: backend-egress-db
-  namespace: lab-reseau
+  namespace: lab-netpol
 spec:
   podSelector:
     matchLabels: {tier: backend}

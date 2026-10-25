@@ -1,0 +1,65 @@
+# Lab 4.7 : trois tiers pour tester les NetworkPolicies (images whoami : répondent en HTTP sur le port choisi)
+apiVersion: v1
+kind: Namespace
+metadata: {name: lab-netpol}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: frontend, namespace: lab-netpol}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: frontend, tier: frontend}}
+  template:
+    metadata: {labels: {app: frontend, tier: frontend}}
+    spec:
+      containers:
+        - name: client
+          image: curlimages/curl:8.10.1
+          command: ["sleep", "36000"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: backend, namespace: lab-netpol}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: backend, tier: backend}}
+  template:
+    metadata: {labels: {app: backend, tier: backend}}
+    spec:
+      containers:
+        - name: api
+          image: traefik/whoami:v1.10
+          args: ["--port", "8080", "--name", "BACKEND"]
+          ports: [{containerPort: 8080}]
+        - name: client
+          image: curlimages/curl:8.10.1
+          command: ["sleep", "36000"]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: backend, namespace: lab-netpol}
+spec:
+  selector: {app: backend}
+  ports: [{port: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: db, namespace: lab-netpol}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: db, tier: db}}
+  template:
+    metadata: {labels: {app: db, tier: db}}
+    spec:
+      containers:
+        - name: db
+          image: traefik/whoami:v1.10
+          args: ["--port", "5432", "--name", "DB"]
+          ports: [{containerPort: 5432}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: db, namespace: lab-netpol}
+spec:
+  selector: {app: db}
+  ports: [{port: 5432}]

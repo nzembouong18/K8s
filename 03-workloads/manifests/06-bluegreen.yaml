@@ -1,0 +1,37 @@
+# Lab 3.8 : deux versions en parallèle, le Service bascule via son selector
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app-blue, namespace: lab-workloads}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: app, version: blue}}
+  template:
+    metadata: {labels: {app: app, version: blue}}
+    spec:
+      containers:
+        - name: web
+          image: traefik/whoami:v1.10
+          args: ["--name", "VERSION-BLUE"]
+          readinessProbe: {httpGet: {path: /health, port: 80}, periodSeconds: 3}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: app-green, namespace: lab-workloads}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: app, version: green}}
+  template:
+    metadata: {labels: {app: app, version: green}}
+    spec:
+      containers:
+        - name: web
+          image: traefik/whoami:v1.10
+          args: ["--name", "VERSION-GREEN"]
+          readinessProbe: {httpGet: {path: /health, port: 80}, periodSeconds: 3}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: app, namespace: lab-workloads}
+spec:
+  selector: {app: app, version: blue}      # bascule : kubectl patch svc app -p '{"spec":{"selector":{"app":"app","version":"green"}}}'
+  ports: [{port: 80, targetPort: 80}]
